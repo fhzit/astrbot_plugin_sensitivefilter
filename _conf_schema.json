@@ -132,6 +132,16 @@
             "hint": "仅对该群生效，会与全局词库叠加生效",
             "type": "list",
             "default": []
+          },
+          "mute_enabled": {
+            "description": "命中后自动禁言",
+            "type": "string",
+            "options": [
+              "跟随全局",
+              "开启",
+              "关闭"
+            ],
+            "default": "跟随全局"
           }
         }
       }
@@ -191,7 +201,7 @@
   },
   "actions": {
     "description": "处理动作默认值",
-    "hint": "配置命中敏感词后的撤回、警告和通知行为；以下均为全局默认值，可在群内用 /敏感词 设置 指令单独覆盖。",
+    "hint": "配置命中敏感词后的撤回、警告、通知和自动禁言行为；布尔开关均为全局默认值，可在群内用 /敏感词 设置 指令单独覆盖。",
     "type": "object",
     "items": {
       "recall_enabled": {
@@ -207,9 +217,9 @@
       },
       "warn_message": {
         "description": "群内警告文案模板",
-        "hint": "支持变量 {sender} 用户名、{word} 命中的敏感词、{source} 检测来源",
+        "hint": "支持变量 {forbidden_words} 敏感词、{original_text} 原文、{masked_text} 脱敏文本、{violation_count} 当日违规次数。兼容旧变量 {sender}/{word}/{source}。",
         "type": "text",
-        "default": "检测到违规内容，已自动处理（命中来源：{source}）"
+        "default": "检测到敏感词，消息已撤回并禁言处理。\n检测到的敏感词：{forbidden_words}\n违规次数：第{violation_count}次"
       },
       "notify_enabled": {
         "description": "命中后转发通知",
@@ -222,6 +232,62 @@
         "hint": "填写 unified_msg_origin，格式如 aiocqhttp:GroupMessage:123456 或 aiocqhttp:FriendMessage:123456，可用 /敏感词 状态 指令查看当前会话的 umo",
         "type": "list",
         "default": []
+      },
+      "notify_message": {
+        "description": "管理员私聊提醒模板",
+        "hint": "命中后转发通知使用的模板。支持变量 {group_id}, {user_name}, {user_id}, {forbidden_words}, {original_text}, {violation_count}, {ban_duration}, {timestamp}。也可使用 {masked_text} 脱敏文本。",
+        "type": "text",
+        "default": "🚨 敏感词警报\n群聊：{group_id}\n用户：{user_name} ({user_id})\n违规次数：第{violation_count}次\n敏感词：{forbidden_words}\n原文：{original_text}\n处理：禁言{ban_duration}秒，消息已撤回\n时间：{timestamp}"
+      },
+      "mute_enabled": {
+        "description": "命中后自动禁言",
+        "hint": "开启后，用户每次触发敏感词都会按当天违规次数执行阶梯禁言。当前仅 aiocqhttp/OneBot 平台支持真正禁言，机器人需要具备群管理员权限。可在群内用 /敏感词 设置 禁言 on/off/默认 单独覆盖。",
+        "type": "bool",
+        "default": false
+      },
+      "mute_first_duration_seconds": {
+        "description": "首次违规禁言时长（秒）",
+        "hint": "同一统计周期内第一次触发敏感词的禁言时长；填 0 表示第一次只计数不禁言。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 1
+        },
+        "default": 60
+      },
+      "mute_second_duration_seconds": {
+        "description": "第二次违规禁言时长（秒）",
+        "hint": "同一天内第二次触发敏感词的禁言时长；填 0 表示第二次只计数不禁言。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 1
+        },
+        "default": 300
+      },
+      "mute_third_duration_seconds": {
+        "description": "第三次违规禁言时长（秒）",
+        "hint": "同一天内第三次及后续触发敏感词的禁言时长，默认 86400 秒（24 小时）；填 0 表示第三次及后续只计数不禁言。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 2592000,
+          "step": 1
+        },
+        "default": 86400
+      },
+      "mute_reset_hour": {
+        "description": "违规次数重置时间（小时）",
+        "hint": "每天几点重置违规次数，24 小时制，范围 0-23。例如填 0 表示每天凌晨 0 点重置，填 4 表示每天凌晨 4 点重置。计数保存在内存中，插件重载/机器人重启后也会重新开始。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 23,
+          "step": 1
+        },
+        "default": 0
       }
     }
   },

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timedelta
 from typing import Any, Optional, Tuple
 
 import aiohttp
@@ -53,6 +54,7 @@ _OVERRIDABLE_BOOL_KEYS = (
     "recall_enabled",
     "warn_enabled",
     "notify_enabled",
+    "mute_enabled",
 )
 
 # 每个全局配置 key 所属的分组（对应 _conf_schema.json 里的顶层 object）。
@@ -74,7 +76,13 @@ _KEY_TO_SECTION = {
     "warn_enabled": "actions",
     "warn_message": "actions",
     "notify_enabled": "actions",
+    "notify_message": "actions",
     "notify_umos": "actions",
+    "mute_enabled": "actions",
+    "mute_first_duration_seconds": "actions",
+    "mute_second_duration_seconds": "actions",
+    "mute_third_duration_seconds": "actions",
+    "mute_reset_hour": "actions",
     "api_enabled": "api_detection",
     "api_provider": "api_detection",
     "api_url": "api_detection",
@@ -126,11 +134,26 @@ _SETTING_KEY_ALIASES = {
     "撤回": "recall_enabled",
     "警告": "warn_enabled",
     "通知": "notify_enabled",
+    "禁言": "mute_enabled",
+    "自动禁言": "mute_enabled",
 }
 
 _ON_VALUES = {"on", "开", "开启", "true", "1", "启用"}
 _OFF_VALUES = {"off", "关", "关闭", "false", "0", "禁用"}
 _FOLLOW_VALUES = {"默认", "跟随", "auto", "follow"}
+
+DEFAULT_WARN_MESSAGE = """检测到敏感词，消息已撤回并禁言处理。
+检测到的敏感词：{forbidden_words}
+违规次数：第{violation_count}次"""
+
+DEFAULT_NOTIFY_MESSAGE = """🚨 敏感词警报
+群聊：{group_id}
+用户：{user_name} ({user_id})
+违规次数：第{violation_count}次
+敏感词：{forbidden_words}
+原文：{original_text}
+处理：禁言{ban_duration}秒，消息已撤回
+时间：{timestamp}"""
 
 
 class SensitiveFilterPlugin(Star):
@@ -151,6 +174,9 @@ class SensitiveFilterPlugin(Star):
         # (event, umo, text, enqueued_at)。普通文字消息和 QQ 合并转发各占一个
         # 批量条目；图片转写出的文字（_check_images 内部调用）始终走即时检测。
         self._llm_batches: dict[str, list[tuple]] = {}
+        # 自动禁言违规计数：按 (umo, sender_id) 记录当前重置周期内的触发次数。
+        # 计数只保存在内存中；AstrBot 重启/插件重载后会重新开始计数。
+        self._violation_counts: dict[tuple[str, str], tuple[str, int]] = {}
         self._llm_batch_lock = asyncio.Lock()
         self._batch_ticker_task: Optional[asyncio.Task] = None
         try:
@@ -272,6 +298,7 @@ class SensitiveFilterPlugin(Star):
             "recall_enabled": "跟随全局",
             "warn_enabled": "跟随全局",
             "notify_enabled": "跟随全局",
+            "mute_enabled": "跟随全局",
             "extra_words": [],
         }
         self._get_group_overrides().append(new_item)
@@ -976,32 +1003,44 @@ class SensitiveFilterPlugin(Star):
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name()
         group_id = event.get_group_id()
+        original_text = event.message_str if audited_text is None else audited_text
+        violation_count, mute_duration = self._record_violation_for_mute(umo, sender_id)
+        mute_executed = False
 
         if self._get_effective(umo, "recall_enabled", True):
             await self._try_recall(event)
 
+        if self._get_effective(umo, "mute_enabled", False):
+            if mute_duration > 0:
+                mute_executed = await self._try_mute(event, violation_count, mute_duration)
+            else:
+                logger.info(
+                    f"[敏感词过滤] 群 {group_id}（{umo}）用户 {sender_id} "
+                    f"本周期第 {violation_count} 次违规，但对应禁言时长为 0，已跳过禁言"
+                )
+
+        template_vars = self._build_template_vars(
+            group_id=group_id,
+            sender_name=sender_name,
+            sender_id=sender_id,
+            hit_word=hit_word,
+            original_text=original_text,
+            violation_count=violation_count,
+            ban_duration=mute_duration if mute_executed else 0,
+            source=source,
+        )
+
         if self._get_effective(umo, "warn_enabled", True):
-            tmpl = self._cfg("warn_message") or "检测到违规内容，已自动处理"
-            warn_text = (
-                tmpl.replace("{sender}", str(sender_name))
-                .replace("{word}", str(hit_word))
-                .replace("{source}", str(source))
-            )
+            tmpl = self._cfg("warn_message") or DEFAULT_WARN_MESSAGE
+            warn_text = self._render_template(tmpl, template_vars)
             chain = [Comp.At(qq=sender_id), Comp.Plain(" " + warn_text)]
             await event.send(event.chain_result(chain))
 
         if self._get_effective(umo, "notify_enabled", False):
             notify_targets = self._cfg("notify_umos", []) or []
             if notify_targets:
-                notify_text = (
-                    "⚠️ 群聊敏感词触发通知\n"
-                    f"群: {group_id}\n"
-                    f"umo: {umo}\n"
-                    f"用户: {sender_name}({sender_id})\n"
-                    f"来源: {source}\n"
-                    f"命中: {hit_word}\n"
-                    f"原文: {event.message_str if audited_text is None else audited_text}"
-                )
+                notify_tmpl = self._cfg("notify_message") or DEFAULT_NOTIFY_MESSAGE
+                notify_text = self._render_template(notify_tmpl, template_vars)
                 for target_umo in notify_targets:
                     try:
                         await self.context.send_message(
@@ -1012,6 +1051,130 @@ class SensitiveFilterPlugin(Star):
 
         if self._cfg("stop_event_on_hit", True):
             event.stop_event()
+
+    def _mask_text(self, text: str, forbidden_words: str) -> str:
+        """根据命中词生成脱敏后的原文。无法精确替换时返回原文。"""
+        masked = str(text or "")
+        for word in str(forbidden_words or "").replace("、", ",").split(","):
+            word = word.strip()
+            if word:
+                masked = masked.replace(word, "***")
+        return masked
+
+    def _build_template_vars(
+        self,
+        *,
+        group_id: Any,
+        sender_name: Any,
+        sender_id: Any,
+        hit_word: Any,
+        original_text: Any,
+        violation_count: int,
+        ban_duration: int,
+        source: Any,
+    ) -> dict[str, str]:
+        original = str(original_text or "")
+        forbidden_words = str(hit_word or "")
+        return {
+            "group_id": str(group_id),
+            "user_name": str(sender_name),
+            "user_id": str(sender_id),
+            "forbidden_words": forbidden_words,
+            "original_text": original,
+            "masked_text": self._mask_text(original, forbidden_words),
+            "violation_count": str(violation_count),
+            "ban_duration": str(max(int(ban_duration or 0), 0)),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # 兼容旧模板变量，便于已有用户平滑升级。
+            "sender": str(sender_name),
+            "word": forbidden_words,
+            "source": str(source),
+        }
+
+    def _render_template(self, template: str, values: dict[str, str]) -> str:
+        rendered = str(template or "")
+        for key, value in values.items():
+            rendered = rendered.replace("{" + key + "}", value)
+        return rendered
+
+    def _current_mute_period_key(self) -> str:
+        """返回自动禁言计数所属的当前重置周期标识。
+
+        reset_hour 表示每天几点开始新的统计周期。比如 reset_hour=4，则
+        03:59 仍算作前一天周期，04:00 起进入新周期。
+        """
+        try:
+            reset_hour = int(self._cfg("mute_reset_hour", 0) or 0)
+        except (TypeError, ValueError):
+            reset_hour = 0
+        reset_hour = min(max(reset_hour, 0), 23)
+        now = datetime.now()
+        period_day = now.date()
+        if now.hour < reset_hour:
+            period_day = (now - timedelta(days=1)).date()
+        return period_day.isoformat()
+
+    def _record_violation_for_mute(self, umo: str, sender_id: str) -> tuple[int, int]:
+        """记录一次违规并返回 (本周期违规次数, 应执行的禁言秒数)。"""
+        period_key = self._current_mute_period_key()
+        key = (str(umo), str(sender_id))
+        old_period, old_count = self._violation_counts.get(key, (period_key, 0))
+        if old_period != period_key:
+            old_count = 0
+        count = old_count + 1
+        self._violation_counts[key] = (period_key, count)
+
+        duration_key = (
+            "mute_first_duration_seconds"
+            if count == 1
+            else "mute_second_duration_seconds"
+            if count == 2
+            else "mute_third_duration_seconds"
+        )
+        try:
+            duration = int(self._cfg(duration_key, 0) or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        return count, max(duration, 0)
+
+    async def _try_mute(
+        self, event: AstrMessageEvent, violation_count: int, duration_seconds: int
+    ) -> bool:
+        """尝试禁言触发违规的用户。当前仅 aiocqhttp/OneBot 支持。"""
+        platform_name = event.get_platform_name()
+        group_id = event.get_group_id()
+        sender_id = event.get_sender_id()
+        if platform_name != "aiocqhttp":
+            logger.info(
+                f"[敏感词过滤] 当前平台 {platform_name} 暂未适配自动禁言，"
+                "已跳过禁言操作（不影响撤回/警告/通知）"
+            )
+            return False
+
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                AiocqhttpMessageEvent,
+            )
+
+            assert isinstance(event, AiocqhttpMessageEvent)
+            client = event.bot
+            await client.api.call_action(
+                "set_group_ban",
+                group_id=int(group_id) if str(group_id).isdigit() else group_id,
+                user_id=int(sender_id) if str(sender_id).isdigit() else sender_id,
+                duration=int(duration_seconds),
+            )
+            logger.info(
+                f"[敏感词过滤] 已对群 {group_id} 用户 {sender_id} 执行自动禁言："
+                f"本周期第 {violation_count} 次违规，时长 {duration_seconds} 秒"
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "[敏感词过滤] 自动禁言失败（可能是机器人无管理员权限、"
+                "目标是管理员/群主或协议端不支持 set_group_ban）"
+            )
+            return False
 
     async def _try_recall(self, event: AstrMessageEvent) -> bool:
         """尝试撤回触发违规的消息。不同平台支持情况不同，失败只记录日志不抛异常。"""
@@ -1060,7 +1223,7 @@ class SensitiveFilterPlugin(Star):
             "/敏感词 本群添加 <词>  仅本群额外生效的词\n"
             "/敏感词 本群删除 <词>  删除本群专属词\n"
             "/敏感词 设置 <项> <on/off/默认>  本群单独覆盖某个开关\n"
-            "    可设置项：总开关/本地/接口/ai/图片/撤回/警告/通知\n"
+            "    可设置项：总开关/本地/接口/ai/图片/撤回/警告/通知/禁言\n"
             "/敏感词 状态           查看本群当前生效的配置（含批量队列等待情况）\n"
             "/敏感词 批量发送       立即把本群队列里现存的消息发出去检测，不再等待\n"
             "/敏感词 白名单 开启|关闭|添加本群|删除本群|列表\n"
@@ -1227,6 +1390,12 @@ class SensitiveFilterPlugin(Star):
             fmt("recall_enabled", "命中后撤回"),
             fmt("warn_enabled", "命中后警告"),
             fmt("notify_enabled", "命中后通知"),
+            fmt("mute_enabled", "命中后自动禁言"),
+            "自动禁言阶梯："
+            f"第1次 {self._cfg('mute_first_duration_seconds', 60)} 秒 / "
+            f"第2次 {self._cfg('mute_second_duration_seconds', 300)} 秒 / "
+            f"第3次及以上 {self._cfg('mute_third_duration_seconds', 86400)} 秒，"
+            f"每日 {self._cfg('mute_reset_hour', 0)} 点重置",
             f"本群专属词库：{len(extra_words)} 个",
             f"umo（在 WebUI「分群配置」里新增条目时请填这个）：{umo}",
         ]
