@@ -1012,7 +1012,9 @@ class SensitiveFilterPlugin(Star):
 
         if self._get_effective(umo, "mute_enabled", False):
             if mute_duration > 0:
-                mute_executed = await self._try_mute(event, violation_count, mute_duration)
+                mute_executed = await self._try_mute(
+                    event, violation_count, mute_duration
+                )
             else:
                 logger.info(
                     f"[敏感词过滤] 群 {group_id}（{umo}）用户 {sender_id} "

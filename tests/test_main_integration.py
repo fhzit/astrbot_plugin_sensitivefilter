@@ -503,7 +503,6 @@ async def run_tests():
     check("调用的是delete_msg", action == "delete_msg")
     check("传入了正确的message_id", kwargs.get("message_id") == "msg-1")
 
-
     # ---------- 自动禁言：aiocqhttp 按同一周期内违规次数执行阶梯禁言 ----------
     plugin_mute, _ctx_mute, _cfg_mute = make_plugin(
         {
@@ -523,19 +522,18 @@ async def run_tests():
     await plugin_mute.on_group_message(ev_mute_3)
     check(
         "自动禁言第一次使用第一档时长",
-        ev_mute_1.bot.api.calls == [
-            ("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 60})
-        ],
+        ev_mute_1.bot.api.calls
+        == [("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 60})],
     )
     check(
         "自动禁言第二次使用第二档时长",
-        ev_mute_2.bot.api.calls == [
-            ("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 120})
-        ],
+        ev_mute_2.bot.api.calls
+        == [("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 120})],
     )
     check(
         "自动禁言第三次及以上使用第三档时长",
-        ev_mute_3.bot.api.calls == [
+        ev_mute_3.bot.api.calls
+        == [
             ("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 86400})
         ],
     )
@@ -548,7 +546,6 @@ async def run_tests():
     await plugin_mute_off.on_group_message(ev_mute_off)
     check("自动禁言关闭时不调用set_group_ban", ev_mute_off.bot.api.calls == [])
 
-
     # ---------- 新模板变量：群内警告 + 管理员通知 ----------
     plugin_tpl, ctx_tpl, _cfg_tpl = make_plugin(
         {
@@ -560,12 +557,17 @@ async def run_tests():
             "warn_enabled": True,
         }
     )
-    ev_tpl = FakeAiocqhttpEvent("10001", "20002", "模板用户", "这是一条含有敏感词的消息")
+    ev_tpl = FakeAiocqhttpEvent(
+        "10001", "20002", "模板用户", "这是一条含有敏感词的消息"
+    )
     await plugin_tpl.on_group_message(ev_tpl)
     tpl_warn_text = "".join(getattr(c, "text", "") for c in ev_tpl.sent_results[0][1])
     check("新警告模板渲染forbidden_words", "检测到的敏感词：敏感词" in tpl_warn_text)
     check("新警告模板渲染violation_count", "违规次数：第1次" in tpl_warn_text)
-    check("管理员通知发送到配置的umo", ctx_tpl.sent_messages[0][0] == "aiocqhttp:FriendMessage:admin")
+    check(
+        "管理员通知发送到配置的umo",
+        ctx_tpl.sent_messages[0][0] == "aiocqhttp:FriendMessage:admin",
+    )
     notify_text = ctx_tpl.sent_messages[0][1].parts[0]
     check("管理员通知模板渲染群号", "群聊：10001" in notify_text)
     check("管理员通知模板渲染用户", "用户：模板用户 (20002)" in notify_text)
@@ -581,10 +583,17 @@ async def run_tests():
             "warn_enabled": True,
         }
     )
-    ev_custom_tpl = FakeEvent("group-custom", "u-custom", "自定义模板用户", "包含敏感词的原文")
+    ev_custom_tpl = FakeEvent(
+        "group-custom", "u-custom", "自定义模板用户", "包含敏感词的原文"
+    )
     await plugin_custom_tpl.on_group_message(ev_custom_tpl)
-    custom_warn_text = "".join(getattr(c, "text", "") for c in ev_custom_tpl.sent_results[0][1])
-    check("自定义警告模板可渲染所有新变量", "词=敏感词;原文=包含敏感词的原文;脱敏=包含***的原文;次数=1" in custom_warn_text)
+    custom_warn_text = "".join(
+        getattr(c, "text", "") for c in ev_custom_tpl.sent_results[0][1]
+    )
+    check(
+        "自定义警告模板可渲染所有新变量",
+        "词=敏感词;原文=包含敏感词的原文;脱敏=包含***的原文;次数=1" in custom_warn_text,
+    )
 
     # ---------- QQ OneBot 合并转发：递归展开文本，但处罚当前转发发送者 ----------
     forward_responses = {
