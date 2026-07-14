@@ -422,9 +422,15 @@ def make_plugin(extra_config=None):
             "actions": {
                 "recall_enabled": True,
                 "warn_enabled": True,
-                "warn_message": "检测到违规内容，已自动处理（命中来源：{source}）",
+                "warn_message": main_mod.DEFAULT_WARN_MESSAGE,
                 "notify_enabled": False,
                 "notify_umos": [],
+                "notify_message": main_mod.DEFAULT_NOTIFY_MESSAGE,
+                "mute_enabled": False,
+                "mute_first_duration_seconds": 60,
+                "mute_second_duration_seconds": 300,
+                "mute_third_duration_seconds": 86400,
+                "mute_reset_hour": 0,
             },
             "api_detection": {
                 "api_enabled": False,
@@ -474,8 +480,12 @@ async def run_tests():
     check("警告消息是chain_result", warn_kind == "chain")
     check("警告里@了发送者", any(getattr(c, "qq", None) == "u1" for c in warn_chain))
     check(
-        "警告文案里包含来源说明",
-        any("本地词库" in getattr(c, "text", "") for c in warn_chain),
+        "警告文案里包含敏感词变量",
+        any("检测到的敏感词：敏感词" in getattr(c, "text", "") for c in warn_chain),
+    )
+    check(
+        "警告文案里包含违规次数变量",
+        any("违规次数：第1次" in getattr(c, "text", "") for c in warn_chain),
     )
     check("命中后事件被stop", ev.stopped is True)
 
@@ -492,6 +502,98 @@ async def run_tests():
     action, kwargs = ev_qq.bot.api.calls[0]
     check("调用的是delete_msg", action == "delete_msg")
     check("传入了正确的message_id", kwargs.get("message_id") == "msg-1")
+
+    # ---------- 自动禁言：aiocqhttp 按同一周期内违规次数执行阶梯禁言 ----------
+    plugin_mute, _ctx_mute, _cfg_mute = make_plugin(
+        {
+            "mute_enabled": True,
+            "mute_first_duration_seconds": 60,
+            "mute_second_duration_seconds": 120,
+            "mute_third_duration_seconds": 86400,
+            "recall_enabled": False,
+            "warn_enabled": False,
+        }
+    )
+    ev_mute_1 = FakeAiocqhttpEvent("10001", "20002", "禁言测试", "敏感词 第一次")
+    ev_mute_2 = FakeAiocqhttpEvent("10001", "20002", "禁言测试", "敏感词 第二次")
+    ev_mute_3 = FakeAiocqhttpEvent("10001", "20002", "禁言测试", "敏感词 第三次")
+    await plugin_mute.on_group_message(ev_mute_1)
+    await plugin_mute.on_group_message(ev_mute_2)
+    await plugin_mute.on_group_message(ev_mute_3)
+    check(
+        "自动禁言第一次使用第一档时长",
+        ev_mute_1.bot.api.calls
+        == [("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 60})],
+    )
+    check(
+        "自动禁言第二次使用第二档时长",
+        ev_mute_2.bot.api.calls
+        == [("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 120})],
+    )
+    check(
+        "自动禁言第三次及以上使用第三档时长",
+        ev_mute_3.bot.api.calls
+        == [
+            ("set_group_ban", {"group_id": 10001, "user_id": 20002, "duration": 86400})
+        ],
+    )
+
+    # ---------- 自动禁言：总开关关闭时不调用 set_group_ban ----------
+    plugin_mute_off, _ctx_mute_off, _cfg_mute_off = make_plugin(
+        {"mute_enabled": False, "recall_enabled": False, "warn_enabled": False}
+    )
+    ev_mute_off = FakeAiocqhttpEvent("10001", "20002", "禁言测试", "敏感词")
+    await plugin_mute_off.on_group_message(ev_mute_off)
+    check("自动禁言关闭时不调用set_group_ban", ev_mute_off.bot.api.calls == [])
+
+    # ---------- 新模板变量：群内警告 + 管理员通知 ----------
+    plugin_tpl, ctx_tpl, _cfg_tpl = make_plugin(
+        {
+            "mute_enabled": True,
+            "mute_first_duration_seconds": 60,
+            "notify_enabled": True,
+            "notify_umos": ["aiocqhttp:FriendMessage:admin"],
+            "recall_enabled": True,
+            "warn_enabled": True,
+        }
+    )
+    ev_tpl = FakeAiocqhttpEvent(
+        "10001", "20002", "模板用户", "这是一条含有敏感词的消息"
+    )
+    await plugin_tpl.on_group_message(ev_tpl)
+    tpl_warn_text = "".join(getattr(c, "text", "") for c in ev_tpl.sent_results[0][1])
+    check("新警告模板渲染forbidden_words", "检测到的敏感词：敏感词" in tpl_warn_text)
+    check("新警告模板渲染violation_count", "违规次数：第1次" in tpl_warn_text)
+    check(
+        "管理员通知发送到配置的umo",
+        ctx_tpl.sent_messages[0][0] == "aiocqhttp:FriendMessage:admin",
+    )
+    notify_text = ctx_tpl.sent_messages[0][1].parts[0]
+    check("管理员通知模板渲染群号", "群聊：10001" in notify_text)
+    check("管理员通知模板渲染用户", "用户：模板用户 (20002)" in notify_text)
+    check("管理员通知模板渲染敏感词", "敏感词：敏感词" in notify_text)
+    check("管理员通知模板渲染原文", "原文：这是一条含有敏感词的消息" in notify_text)
+    check("管理员通知模板渲染禁言时长", "处理：禁言60秒，消息已撤回" in notify_text)
+    check("管理员通知模板渲染时间", "时间：" in notify_text)
+
+    plugin_custom_tpl, _ctx_custom_tpl, _cfg_custom_tpl = make_plugin(
+        {
+            "warn_message": "词={forbidden_words};原文={original_text};脱敏={masked_text};次数={violation_count}",
+            "recall_enabled": False,
+            "warn_enabled": True,
+        }
+    )
+    ev_custom_tpl = FakeEvent(
+        "group-custom", "u-custom", "自定义模板用户", "包含敏感词的原文"
+    )
+    await plugin_custom_tpl.on_group_message(ev_custom_tpl)
+    custom_warn_text = "".join(
+        getattr(c, "text", "") for c in ev_custom_tpl.sent_results[0][1]
+    )
+    check(
+        "自定义警告模板可渲染所有新变量",
+        "词=敏感词;原文=包含敏感词的原文;脱敏=包含***的原文;次数=1" in custom_warn_text,
+    )
 
     # ---------- QQ OneBot 合并转发：递归展开文本，但处罚当前转发发送者 ----------
     forward_responses = {
@@ -808,7 +910,7 @@ async def run_tests():
     warn_kind2, warn_chain2 = ev_llm.sent_results[0]
     check(
         "LLM命中原因体现在警告文案中",
-        any("AI 语义检测" in getattr(c, "text", "") for c in warn_chain2),
+        any("疑似诈骗信息" in getattr(c, "text", "") for c in warn_chain2),
     )
     config["llm_detection"]["llm_enabled"] = False
 
@@ -853,8 +955,8 @@ async def run_tests():
     check("批量未命中的不会被警告-第3条", len(ev_b3.sent_results) == 0)
     warn_kind_batch, warn_chain_batch = ev_b2.sent_results[0]
     check(
-        "批量命中来源体现在警告文案中",
-        any("AI 语义检测（批量）" in getattr(c, "text", "") for c in warn_chain_batch),
+        "批量命中原因体现在警告文案中",
+        any("广告引流" in getattr(c, "text", "") for c in warn_chain_batch),
     )
     check(
         "批量prompt里包含三条消息内容",
@@ -1080,8 +1182,8 @@ async def run_tests():
     check("图片内容违规时发出警告", len(ev_img_violate.sent_results) == 1)
     warn_kind_img, warn_chain_img = ev_img_violate.sent_results[0]
     check(
-        "图片违规来源体现在警告文案中",
-        any("AI 图片审核" in getattr(c, "text", "") for c in warn_chain_img),
+        "图片违规原因体现在警告文案中",
+        any("血腥暴力画面" in getattr(c, "text", "") for c in warn_chain_img),
     )
     check(
         "确实把图片路径传给了视觉Provider",
@@ -1106,12 +1208,8 @@ async def run_tests():
     check("图片文字命中本地词库时发出警告", len(ev_img_text_hit.sent_results) == 1)
     warn_kind_img2, warn_chain_img2 = ev_img_text_hit.sent_results[0]
     check(
-        "图片文字识别来源体现在警告文案中",
-        any(
-            "图片文字识别" in getattr(c, "text", "")
-            and "本地词库" in getattr(c, "text", "")
-            for c in warn_chain_img2
-        ),
+        "图片文字识别命中词体现在警告文案中",
+        any("敏感词" in getattr(c, "text", "") for c in warn_chain_img2),
     )
 
     # ---------- 图片检测：图片不违规且没有文字 ----------
@@ -1189,8 +1287,8 @@ async def run_tests():
     check("uapis接口检测端到端命中并发出警告", len(ev_api.sent_results) == 1)
     warn_kind3, warn_chain3 = ev_api.sent_results[0]
     check(
-        "外部接口命中原因体现在警告文案中",
-        any("外部接口" in getattr(c, "text", "") for c in warn_chain3),
+        "外部接口命中词体现在警告文案中",
+        any("诈骗" in getattr(c, "text", "") for c in warn_chain3),
     )
 
     ev_api_clean = FakeEvent("group7", "u11", "陈十三", "今天天气真好")
