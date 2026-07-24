@@ -363,7 +363,11 @@ class SensitiveFilterPlugin(Star):
 
     def _add_to_user_whitelist(self, user_id: str) -> bool:
         user_id = str(user_id).strip()
-        items = [str(item).strip() for item in (self._cfg("user_whitelist_ids", []) or []) if str(item).strip()]
+        items = [
+            str(item).strip()
+            for item in (self._cfg("user_whitelist_ids", []) or [])
+            if str(item).strip()
+        ]
         if user_id in items:
             return False
         items.append(user_id)
@@ -372,7 +376,11 @@ class SensitiveFilterPlugin(Star):
 
     def _remove_from_user_whitelist(self, user_id: str) -> bool:
         user_id = str(user_id).strip()
-        items = [str(item).strip() for item in (self._cfg("user_whitelist_ids", []) or []) if str(item).strip()]
+        items = [
+            str(item).strip()
+            for item in (self._cfg("user_whitelist_ids", []) or [])
+            if str(item).strip()
+        ]
         if user_id not in items:
             return False
         items.remove(user_id)
@@ -1486,7 +1494,9 @@ class SensitiveFilterPlugin(Star):
     async def cmd_user_whitelist_add(self, event: AstrMessageEvent, user_id: str):
         user_id = str(user_id or "").strip()
         if not user_id:
-            yield event.plain_result("请提供要添加的用户 ID，例如：/敏感词 用户白名单 添加 123456")
+            yield event.plain_result(
+                "请提供要添加的用户 ID，例如：/敏感词 用户白名单 添加 123456"
+            )
             return
         if self._add_to_user_whitelist(user_id):
             yield event.plain_result(f"已将用户 {user_id} 加入用户白名单")
@@ -1498,7 +1508,9 @@ class SensitiveFilterPlugin(Star):
     async def cmd_user_whitelist_remove(self, event: AstrMessageEvent, user_id: str):
         user_id = str(user_id or "").strip()
         if not user_id:
-            yield event.plain_result("请提供要删除的用户 ID，例如：/敏感词 用户白名单 删除 123456")
+            yield event.plain_result(
+                "请提供要删除的用户 ID，例如：/敏感词 用户白名单 删除 123456"
+            )
             return
         if self._remove_from_user_whitelist(user_id):
             yield event.plain_result(f"已将用户 {user_id} 移出用户白名单")
@@ -1509,14 +1521,20 @@ class SensitiveFilterPlugin(Star):
     @user_whitelist_group.command("列表")
     async def cmd_user_whitelist_list(self, event: AstrMessageEvent):
         enabled = self._cfg("user_whitelist_enabled", True)
-        items = [str(item).strip() for item in (self._cfg("user_whitelist_ids", []) or []) if str(item).strip()]
+        items = [
+            str(item).strip()
+            for item in (self._cfg("user_whitelist_ids", []) or [])
+            if str(item).strip()
+        ]
         status = "已开启" if enabled else "已关闭"
         if not items:
             yield event.plain_result(f"用户白名单当前{status}，列表为空")
             return
         preview = "\n".join(items[:50])
         more = f"\n（共 {len(items)} 个，仅显示前 50 个）" if len(items) > 50 else ""
-        yield event.plain_result(f"用户白名单当前{status}，共 {len(items)} 个：\n{preview}{more}")
+        yield event.plain_result(
+            f"用户白名单当前{status}，共 {len(items)} 个：\n{preview}{more}"
+        )
 
     # ------------------------------------------------------------------
     # 白名单 / 黑名单子指令组
