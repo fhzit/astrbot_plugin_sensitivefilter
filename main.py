@@ -1475,7 +1475,6 @@ class SensitiveFilterPlugin(Star):
     @sw_group.group("用户白名单")
     def user_whitelist_group(self):
         """用户白名单管理子指令，见 /敏感词 帮助"""
-        pass
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @user_whitelist_group.command("开启")

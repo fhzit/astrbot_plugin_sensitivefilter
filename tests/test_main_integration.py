@@ -980,7 +980,7 @@ async def run_tests():
     config["llm_detection"]["llm_enabled"] = False
 
     # ---------- 用户白名单：批量队列等待期间命中用户白名单后不处罚 ----------
-    plugin_batch_user_allow, ctx_batch_user_allow, cfg_batch_user_allow = make_plugin(
+    plugin_batch_user_allow, ctx_batch_user_allow, _cfg_batch_user_allow = make_plugin(
         {
             "llm_enabled": True,
             "llm_batch_enabled": True,
